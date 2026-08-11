@@ -145,6 +145,17 @@ app.get('/api/ping', async (req, res) => {
     }
   }, 10000);
 
+  pingCmd.on('error', (err) => {
+    clearTimeout(timeoutId);
+    if (!res.headersSent) {
+      const latencyMs = Math.round(performance.now() - start);
+      let errorMsg = 'Failed to execute ping';
+      if (err.code === 'ENOENT') errorMsg = 'Ping is not supported in this hosting environment.';
+      logHistory('Ping', host, 'Failed', latencyMs, { error: errorMsg });
+      res.status(501).json({ success: false, error: errorMsg });
+    }
+  });
+
   pingCmd.stdout.on('data', (data) => { stdout += data.toString(); });
   pingCmd.stderr.on('data', (data) => { stderr += data.toString(); });
   pingCmd.on('close', (code) => {
@@ -268,6 +279,7 @@ app.get('/api/ssl', (req, res) => {
   });
 
   socket.on('error', (err) => {
+    if (res.headersSent) return;
     socket.destroy();
     const latency = Math.round(performance.now() - start);
     let errorMessage = 'Failed to connect to host';
@@ -279,6 +291,7 @@ app.get('/api/ssl', (req, res) => {
   });
 
   socket.on('timeout', () => {
+    if (res.headersSent) return;
     socket.destroy();
     const latency = Math.round(performance.now() - start);
     logHistory('SSL', domain, 'Failed', latency, { error: 'Connection timeout' });
@@ -293,7 +306,10 @@ app.get('/api/whois', async (req, res) => {
   const start = performance.now();
 
   try {
-    const rawData = await whois(domain);
+    const rawData = await Promise.race([
+      whois(domain),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Connection timeout')), 60000))
+    ]);
     const latency = Math.round(performance.now() - start);
     const dataStr = JSON.stringify(rawData).toLowerCase();
     if (Object.keys(rawData).length === 0 || dataStr.includes('no match') || dataStr.includes('not found') || dataStr.includes('no data found')) {
@@ -355,7 +371,7 @@ app.get('/api/whois', async (req, res) => {
     let msg = 'Failed to fetch WHOIS records.';
     if (error.message && error.message.toLowerCase().includes('timeout')) msg = 'Connection timeout while reaching WHOIS server';
     logHistory('WHOIS', domain, 'Failed', latency, { error: msg });
-    res.status(error.message && error.message.toLowerCase().includes('timeout') ? 404 : 500).json({ success: false, error: msg });
+    res.status(error.message && error.message.toLowerCase().includes('timeout') ? 504 : 500).json({ success: false, error: msg });
   }
 });
 
@@ -434,8 +450,10 @@ app.get('/api/traceroute', (req, res) => {
   traceroute.on('error', (err) => {
     clearTimeout(timeoutId);
     const latency = Math.round(performance.now() - start);
-    logHistory('Traceroute', host, 'Failed', latency, { error: err.message });
-    sendEvent('error', { message: 'Failed to start traceroute process. ' + err.message });
+    let errMsg = err.message;
+    if (err.code === 'ENOENT') errMsg = 'Traceroute is not supported in this hosting environment.';
+    logHistory('Traceroute', host, 'Failed', latency, { error: errMsg });
+    sendEvent('error', { message: errMsg });
     res.end();
   });
 
